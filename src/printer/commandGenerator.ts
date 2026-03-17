@@ -127,6 +127,19 @@ export function cmdApplyEnergy(): Uint8Array {
 }
 
 /**
+ * Set paper feed speed (quality). Lower = faster feed; 28–40 typical. Slower = better heating.
+ * Cat-Printer: make_command(0xbd, int_to_bytes(value))
+ */
+export function cmdSetSpeed(value: number): Uint8Array {
+  const v = Math.max(4, Math.min(255, value));
+  const bArr = bs([
+    81, 120, -67, 0, 1, 0, v, 0, 0xff,
+  ]);
+  bArr[7] = chkSum(bArr, 6, 1);
+  return bArr;
+}
+
+/**
  * Encode a run of repeated values for run-length compression
  */
 function encodeRunLengthRepetition(n: number, val: number): number[] {
@@ -223,19 +236,20 @@ export function cmdPrintRow(imgRow: boolean[]): Uint8Array {
 
 /**
  * Generate complete command sequence to print an image
- * 
+ *
  * @param img - Binary image (2D array of booleans)
- * @param energy - Thermal energy level (0x0000-0xFFFF, default: 0xFFFF)
- * @returns Complete command data as Uint8Array
+ * @param energy - Thermal energy (0x0000-0xFFFF)
+ * @param quality - Paper feed speed 28-40 (lower = faster; slower = better heating)
  */
 export function cmdsPrintImg(
-  img: BinaryImage, 
-  energy: number = 0xffff
+  img: BinaryImage,
+  energy: number = 0xffff,
+  quality: number = 36
 ): Uint8Array {
-  // Initialize with setup commands
   const parts: Uint8Array[] = [
     CMD_GET_DEV_STATE,
     CMD_SET_QUALITY_200_DPI,
+    cmdSetSpeed(quality),
     cmdSetEnergy(energy),
     cmdApplyEnergy(),
     CMD_LATTICE_START,

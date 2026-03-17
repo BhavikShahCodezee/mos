@@ -34,7 +34,8 @@ const PRINTER_READY_NOTIFICATION = Buffer.from([
 /**
  * Timing constants
  */
-const SCAN_TIMEOUT_MS = 10000;
+const DEFAULT_SCAN_TIME_MS = 4000;
+const SCAN_FOR_ONE_TIMEOUT_MS = 10000;
 const WAIT_AFTER_EACH_CHUNK_MS = 20;
 const WAIT_FOR_PRINTER_DONE_TIMEOUT_MS = 30000;
 
@@ -93,50 +94,88 @@ export class PrinterService {
   }
   
   /**
-   * Scan for printer devices
-   * 
-   * @param deviceName - Optional device name to search for (e.g., "GT01", "GB02")
+   * Scan for printer devices (known models or all BLE devices).
+   *
+   * @param options - scanTimeMs: duration in ms; listAll: if true, return all BLE devices
+   * @returns List of found devices
+   */
+  async scanForDevices(options?: {
+    scanTimeMs?: number;
+    listAll?: boolean;
+  }): Promise<Device[]> {
+    this.checkBleAvailable();
+    await this.initialize();
+
+    const scanTimeMs = options?.scanTimeMs ?? DEFAULT_SCAN_TIME_MS;
+    const listAll = options?.listAll ?? false;
+    const seen = new Map<string, Device>();
+
+    return new Promise((resolve, reject) => {
+      const timeout = setTimeout(() => {
+        this.bleManager!.stopDeviceScan();
+        resolve(Array.from(seen.values()));
+      }, scanTimeMs);
+
+      this.bleManager!.startDeviceScan(
+        null,
+        { allowDuplicates: true },
+        (error, device) => {
+          if (error) {
+            clearTimeout(timeout);
+            this.bleManager!.stopDeviceScan();
+            reject(error);
+            return;
+          }
+          if (!device?.id) return;
+
+          const isPrinter = listAll || device.serviceUUIDs?.some(uuid =>
+            POSSIBLE_SERVICE_UUIDS.includes(uuid.toLowerCase())
+          ) || /^(GT01|GB0[23]|YT01)/i.test(device.name || '');
+          if (isPrinter && !seen.has(device.id)) {
+            seen.set(device.id, device);
+          }
+        }
+      );
+    });
+  }
+
+  /**
+   * Scan for a single printer (by name or first available).
+   *
+   * @param deviceName - Optional device name (e.g. "GT01", "GB02")
+   * @param scanTimeMs - How long to scan
    * @returns Found device
    */
-  async scanForPrinter(deviceName?: string): Promise<Device> {
+  async scanForPrinter(deviceName?: string, scanTimeMs: number = SCAN_FOR_ONE_TIMEOUT_MS): Promise<Device> {
     this.checkBleAvailable();
-    
-    console.log(
-      deviceName 
-        ? `⏳ Looking for BLE device named ${deviceName}...`
-        : '⏳ Trying to auto-discover a printer...'
-    );
-    
+    await this.initialize();
+
     return new Promise((resolve, reject) => {
       const timeout = setTimeout(() => {
         this.bleManager!.stopDeviceScan();
         reject(new Error(
           'Unable to find printer. Make sure it is turned on and in range.'
         ));
-      }, SCAN_TIMEOUT_MS);
-      
+      }, scanTimeMs);
+
       this.bleManager!.startDeviceScan(
         null,
         null,
         (error, device) => {
           if (error) {
             clearTimeout(timeout);
-            this.bleManager.stopDeviceScan();
+            this.bleManager!.stopDeviceScan();
             reject(error);
             return;
           }
-          
-          if (!device) {
-            return;
-          }
-          
-          // Check if device matches criteria
+          if (!device) return;
+
           const isMatch = deviceName
             ? device.name === deviceName
-            : device.serviceUUIDs?.some(uuid => 
+            : device.serviceUUIDs?.some(uuid =>
                 POSSIBLE_SERVICE_UUIDS.includes(uuid.toLowerCase())
-              );
-          
+              ) || /^(GT01|GB0[23]|YT01)/i.test(device.name || '');
+
           if (isMatch) {
             clearTimeout(timeout);
             this.bleManager!.stopDeviceScan();
@@ -166,6 +205,20 @@ export class PrinterService {
     );
   }
   
+  /**
+   * Whether a device is currently connected.
+   */
+  isConnected(): boolean {
+    return this.connectedDevice != null;
+  }
+
+  /**
+   * Currently connected device (if any).
+   */
+  getConnectedDevice(): Device | null {
+    return this.connectedDevice;
+  }
+
   /**
    * Disconnect from the printer
    */
@@ -276,9 +329,9 @@ export class PrinterService {
     // Set up notifications
     await this.setupNotifications();
     
-    // Get MTU size (default to 23 if not available)
-    const mtu = await this.connectedDevice.requestMTU(512);
-    const chunkSize = mtu - 3;  // BLE overhead
+    const updatedDevice = await this.connectedDevice.requestMTU(512);
+    const mtu = updatedDevice.mtu ?? 512;
+    const chunkSize = mtu - 3;
     
     console.log(
       `⏳ Sending ${data.length} bytes of data in chunks of ${chunkSize} bytes...`
@@ -311,24 +364,29 @@ export class PrinterService {
   }
   
   /**
-   * Complete print workflow: scan, connect, send, disconnect
-   * 
+   * Send print data. Uses existing connection if connected; otherwise scans and connects.
+   * Keeps connection open after printing (like Cat-Printer).
+   *
    * @param data - Print data
-   * @param deviceName - Optional device name
+   * @param deviceName - Optional device name to use if not already connected
    */
   async print(data: Uint8Array | Buffer, deviceName?: string): Promise<void> {
-    try {
-      await this.initialize();
-      
+    await this.initialize();
+
+    const useExisting =
+      this.connectedDevice &&
+      (!deviceName || this.connectedDevice.name === deviceName);
+    if (!useExisting) {
+      if (this.connectedDevice) await this.disconnect();
       const device = await this.scanForPrinter(deviceName);
       await this.connect(device);
+    }
+
+    try {
       await this.sendData(data);
-      
     } catch (error) {
       console.error('🛑 Print error:', error);
       throw error;
-    } finally {
-      await this.disconnect();
     }
   }
   

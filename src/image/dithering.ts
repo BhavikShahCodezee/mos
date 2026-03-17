@@ -37,7 +37,7 @@ export type BinaryImage = boolean[][];
  * @param img - Grayscale image (2D array of 0-255 values)
  * @returns Binary image (2D array of booleans)
  */
-export function floydSteinbergDither(img: GrayscaleImage): BinaryImage {
+export function floydSteinbergDither(img: GrayscaleImage, threshold: number = 127): BinaryImage {
   const height = img.length;
   const width = img[0].length;
   
@@ -54,7 +54,7 @@ export function floydSteinbergDither(img: GrayscaleImage): BinaryImage {
   for (let y = 0; y < height; y++) {
     for (let x = 0; x < width; x++) {
       const oldPixel = workingImg[y][x];
-      const newPixel = oldPixel > 127 ? 255 : 0;
+      const newPixel = oldPixel > threshold ? 255 : 0;
       const error = oldPixel - newPixel;
       
       workingImg[y][x] = newPixel;
@@ -67,8 +67,7 @@ export function floydSteinbergDither(img: GrayscaleImage): BinaryImage {
     }
   }
   
-  // Convert to binary (threshold at 127)
-  return workingImg.map(row => row.map(pixel => pixel > 127));
+  return workingImg.map(row => row.map(pixel => pixel > threshold));
 }
 
 /**
@@ -81,7 +80,7 @@ export function floydSteinbergDither(img: GrayscaleImage): BinaryImage {
  * @param img - Grayscale image (2D array of 0-255 values)
  * @returns Binary image (2D array of booleans)
  */
-export function atkinsonDither(img: GrayscaleImage): BinaryImage {
+export function atkinsonDither(img: GrayscaleImage, threshold: number = 127): BinaryImage {
   const height = img.length;
   const width = img[0].length;
   
@@ -98,7 +97,7 @@ export function atkinsonDither(img: GrayscaleImage): BinaryImage {
   for (let y = 0; y < height; y++) {
     for (let x = 0; x < width; x++) {
       const oldPixel = workingImg[y][x];
-      const newPixel = oldPixel > 127 ? 255 : 0;
+      const newPixel = oldPixel > threshold ? 255 : 0;
       const error = oldPixel - newPixel;
       
       workingImg[y][x] = newPixel;
@@ -113,8 +112,7 @@ export function atkinsonDither(img: GrayscaleImage): BinaryImage {
     }
   }
   
-  // Convert to binary (threshold at 127)
-  return workingImg.map(row => row.map(pixel => pixel > 127));
+  return workingImg.map(row => row.map(pixel => pixel > threshold));
 }
 
 /**
@@ -201,17 +199,18 @@ export function halftoneDither(img: GrayscaleImage): BinaryImage {
 /**
  * Mean Threshold Binarization
  * 
- * Simple thresholding based on the mean pixel value of the image.
- * Pixels above the mean become white, below become black.
+ * Simple thresholding. If threshold is provided use it; else use image mean.
  * 
  * @param img - Grayscale image (2D array of 0-255 values)
+ * @param threshold - Optional fixed threshold (0-255). If not set, uses image mean.
  * @returns Binary image (2D array of booleans)
  */
-export function meanThresholdBinarize(img: GrayscaleImage): BinaryImage {
+export function meanThresholdBinarize(img: GrayscaleImage, threshold?: number): BinaryImage {
+  if (threshold != null) {
+    return img.map(row => row.map(pixel => pixel > threshold));
+  }
   const height = img.length;
   const width = img[0].length;
-  
-  // Calculate mean
   let sum = 0;
   for (let y = 0; y < height; y++) {
     for (let x = 0; x < width; x++) {
@@ -219,21 +218,20 @@ export function meanThresholdBinarize(img: GrayscaleImage): BinaryImage {
     }
   }
   const mean = sum / (height * width);
-  
-  // Apply threshold
   return img.map(row => row.map(pixel => pixel > mean));
 }
 
 /**
  * No Dithering - Simple Threshold
  * 
- * Converts grayscale to binary using a fixed threshold of 127.
+ * Converts grayscale to binary using a fixed threshold.
  * 
  * @param img - Grayscale image (2D array of 0-255 values)
+ * @param threshold - Threshold 0-255 (default 127)
  * @returns Binary image (2D array of booleans)
  */
-export function simpleBinarize(img: GrayscaleImage): BinaryImage {
-  return img.map(row => row.map(pixel => pixel > 127));
+export function simpleBinarize(img: GrayscaleImage, threshold: number = 127): BinaryImage {
+  return img.map(row => row.map(pixel => pixel > threshold));
 }
 
 /**
@@ -241,23 +239,25 @@ export function simpleBinarize(img: GrayscaleImage): BinaryImage {
  * 
  * @param img - Grayscale image (2D array of 0-255 values)
  * @param algorithm - The dithering algorithm to use
+ * @param threshold - Brightness/threshold 0-255 (default 127). Higher = darker result.
  * @returns Binary image (2D array of booleans)
  */
 export function applyDithering(
   img: GrayscaleImage, 
-  algorithm: DitheringAlgorithm
+  algorithm: DitheringAlgorithm,
+  threshold: number = 127
 ): BinaryImage {
   switch (algorithm) {
     case 'floyd-steinberg':
-      return floydSteinbergDither(img);
+      return floydSteinbergDither(img, threshold);
     case 'atkinson':
-      return atkinsonDither(img);
+      return atkinsonDither(img, threshold);
     case 'halftone':
       return halftoneDither(img);
     case 'mean-threshold':
-      return meanThresholdBinarize(img);
+      return meanThresholdBinarize(img, threshold);
     case 'none':
-      return simpleBinarize(img);
+      return simpleBinarize(img, threshold);
     default:
       throw new Error(`Unknown dithering algorithm: ${algorithm}`);
   }

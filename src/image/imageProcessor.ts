@@ -20,91 +20,81 @@ export const PRINT_WIDTH = 384;
 
 /**
  * Convert image URI to grayscale pixel array using Canvas
- * 
+ *
  * @param uri - Image URI (local file or base64)
  * @param width - Image width
  * @param height - Image height
- * @returns 2D array of grayscale pixel values (0-255)
+ * @param transparentAsWhite - If true, treat transparent pixels as white
  */
 async function imageToGrayscale(
-  uri: string, 
-  width: number, 
-  height: number
+  uri: string,
+  width: number,
+  height: number,
+  transparentAsWhite: boolean = true
 ): Promise<GrayscaleImage> {
   return new Promise((resolve, reject) => {
-    // Create a canvas element
     const canvas = new Canvas(width, height);
     const ctx = canvas.getContext('2d');
-    
-    // Load image
+
     const img = new Image();
     img.onload = () => {
       try {
-        // Draw image to canvas
         ctx.drawImage(img, 0, 0, width, height);
-        
-        // Get image data
         const imageData = ctx.getImageData(0, 0, width, height);
         const pixels = imageData.data;
-        
-        // Convert RGBA to grayscale
         const grayscale: GrayscaleImage = [];
-        
+
         for (let y = 0; y < height; y++) {
           const row: number[] = [];
           for (let x = 0; x < width; x++) {
             const i = (y * width + x) * 4;
-            const r = pixels[i];
-            const g = pixels[i + 1];
-            const b = pixels[i + 2];
-            
-            // Standard grayscale conversion formula
+            let r = pixels[i];
+            let g = pixels[i + 1];
+            let b = pixels[i + 2];
+            const a = pixels[i + 3] / 255;
+            if (transparentAsWhite && a < 1) {
+              r = r * a + (1 - a) * 255;
+              g = g * a + (1 - a) * 255;
+              b = b * a + (1 - a) * 255;
+            } else if (!transparentAsWhite && a < 1) {
+              r *= a;
+              g *= a;
+              b *= a;
+            }
             const gray = Math.round(0.299 * r + 0.587 * g + 0.114 * b);
-            row.push(gray);
+            row.push(Math.min(255, Math.max(0, gray)));
           }
           grayscale.push(row);
         }
-        
         resolve(grayscale);
       } catch (error) {
         reject(error);
       }
     };
-    
-    img.onerror = (error) => {
-      reject(new Error(`Failed to load image: ${error}`));
-    };
-    
+    img.onerror = (err) => reject(new Error(`Failed to load image: ${err}`));
     img.src = uri;
   });
 }
 
 /**
- * Resize image to printer width while maintaining aspect ratio
- * 
- * @param uri - Image URI
- * @param targetWidth - Target width in pixels (default: PRINT_WIDTH)
- * @returns Resized image URI
+ * Resize image to printer width (optionally rotate 90° first, like Cat-Printer).
  */
 export async function resizeImage(
-  uri: string, 
-  targetWidth: number = PRINT_WIDTH
+  uri: string,
+  targetWidth: number = PRINT_WIDTH,
+  rotate90: boolean = false
 ): Promise<string> {
-  const result = await manipulateAsync(
-    uri,
-    [
-      {
-        resize: {
-          width: targetWidth,
-        },
-      },
-    ],
-    {
-      compress: 1,
-      format: SaveFormat.PNG,
-    }
-  );
-  
+  const actions: Parameters<typeof manipulateAsync>[1] = [];
+  if (rotate90) {
+    actions.push({ rotate: 90 });
+  }
+  actions.push({
+    resize: { width: targetWidth },
+  });
+  const result = await manipulateAsync(uri, actions, {
+    compress: 1,
+    format: SaveFormat.PNG,
+  });
   return result.uri;
 }
 
@@ -122,48 +112,47 @@ export async function convertToGrayscale(uri: string): Promise<string> {
   return uri;
 }
 
+export interface ProcessImageOptions {
+  algorithm?: DitheringAlgorithm;
+  /** Brightness/threshold 0-255 (default 127). Higher = darker. */
+  threshold?: number;
+  /** Rotate image 90° before printing (like Cat-Printer). */
+  rotate?: boolean;
+  /** Treat transparent pixels as white (default true). */
+  transparentAsWhite?: boolean;
+}
+
 /**
- * Process image for printing
- * 
- * This is the main entry point for image processing. It:
- * 1. Resizes the image to printer width
- * 2. Converts to grayscale
- * 3. Applies the specified dithering algorithm
- * 4. Returns binary image (inversion happens in print service)
- * 
- * @param uri - Image URI
- * @param algorithm - Dithering algorithm to use
- * @returns Binary image ready for printing
+ * Process image for printing (same flow as Cat-Printer).
+ * Resize → optional rotate → grayscale → dithering → binary.
  */
 export async function processImageForPrinting(
   uri: string,
-  algorithm: DitheringAlgorithm = 'floyd-steinberg'
+  algorithm: DitheringAlgorithm = 'floyd-steinberg',
+  options: ProcessImageOptions = {}
 ): Promise<BinaryImage> {
+  const {
+    threshold = 127,
+    rotate = false,
+    transparentAsWhite = true,
+  } = options;
+
   console.log('⏳ Resizing image to', PRINT_WIDTH, 'pixels wide...');
-  
-  // Resize image
-  const resizedUri = await resizeImage(uri, PRINT_WIDTH);
-  
-  // Get dimensions of resized image
+  const resizedUri = await resizeImage(uri, PRINT_WIDTH, rotate);
   const dimensions = await getImageDimensions(resizedUri);
-  
-  console.log('⏳ Converting to grayscale...');
   console.log(`   Image size: ${dimensions.width}x${dimensions.height}`);
-  
-  // Convert to grayscale pixel array
+
+  console.log('⏳ Converting to grayscale...');
   const grayscaleImage = await imageToGrayscale(
-    resizedUri, 
-    dimensions.width, 
-    dimensions.height
+    resizedUri,
+    dimensions.width,
+    dimensions.height,
+    transparentAsWhite
   );
-  
-  console.log(`⏳ Applying ${algorithm} dithering...`);
-  
-  // Apply dithering algorithm
-  const binaryImage = applyDithering(grayscaleImage, algorithm);
-  
+
+  console.log(`⏳ Applying ${algorithm} dithering (threshold=${threshold})...`);
+  const binaryImage = applyDithering(grayscaleImage, algorithm, threshold);
   console.log('✅ Image processing complete');
-  
   return binaryImage;
 }
 

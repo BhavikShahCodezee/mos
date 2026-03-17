@@ -8,18 +8,27 @@
  */
 
 import { DitheringAlgorithm, BinaryImage } from '../image/dithering';
-import { processImageForPrinting, invertBinaryImage } from '../image/imageProcessor';
+import { processImageForPrinting, invertBinaryImage, ProcessImageOptions } from '../image/imageProcessor';
 import { cmdsPrintImg } from '../printer/commandGenerator';
 import { getPrinterService } from '../bluetooth/printerService';
+import { getDryRun, getQuality } from '../settings';
+import type { Device } from 'react-native-ble-plx';
 
 /**
- * Print configuration options
+ * Print configuration options (Cat-Printer–style)
  */
 export interface PrintOptions {
   imageUri: string;
   algorithm?: DitheringAlgorithm;
   energy?: number;
+  /** Brightness/threshold 0-255. Higher = darker. */
+  threshold?: number;
+  /** Rotate image 90° before printing. */
+  rotate?: boolean;
+  transparentAsWhite?: boolean;
   deviceName?: string;
+  /** Use this device if already connected. */
+  device?: Device | null;
   showPreview?: boolean;
 }
 
@@ -51,19 +60,27 @@ export class PrintService {
       imageUri,
       algorithm = 'floyd-steinberg',
       energy = 0xffff,
+      threshold = 127,
+      rotate = false,
+      transparentAsWhite = true,
       deviceName,
+      device,
       showPreview = false,
     } = options;
-    
+
     try {
       console.log('🖨️ Starting print job...');
       console.log(`   Image: ${imageUri}`);
       console.log(`   Algorithm: ${algorithm}`);
       console.log(`   Energy: 0x${energy.toString(16)}`);
-      
-      // Step 1: Process image
+
+      const processOpts: ProcessImageOptions = {
+        threshold,
+        rotate,
+        transparentAsWhite,
+      };
       console.log('⏳ Processing image...');
-      const binaryImage = await processImageForPrinting(imageUri, algorithm);
+      const binaryImage = await processImageForPrinting(imageUri, algorithm, processOpts);
       
       // Invert image (printer logic)
       const invertedImage = invertBinaryImage(binaryImage);
@@ -81,15 +98,26 @@ export class PrintService {
         console.log('ℹ️  Preview requested (not yet implemented)');
       }
       
-      // Step 3: Generate printer commands
       console.log('⏳ Generating printer commands...');
-      const commandData = cmdsPrintImg(invertedImage, energy);
+      const quality = getQuality();
+      const commandData = cmdsPrintImg(invertedImage, energy, quality);
       console.log(`✅ Generated ${commandData.length} bytes of commands`);
       
-      // Step 4: Send to printer via BLE
-      console.log('⏳ Sending to printer...');
       const printerService = getPrinterService();
-      await printerService.print(commandData, deviceName);
+      if (getDryRun()) {
+        console.log(' Dry run: skipping BLE send');
+      } else {
+        console.log('⏳ Sending to printer...');
+        if (device) {
+          if (!printerService.isConnected() || printerService.getConnectedDevice()?.id !== device.id) {
+            await printerService.disconnect();
+            await printerService.connect(device);
+          }
+          await printerService.sendData(commandData);
+        } else {
+          await printerService.print(commandData, deviceName);
+        }
+      }
       
       console.log('✅ Print job completed successfully!');
       
@@ -112,32 +140,62 @@ export class PrintService {
   }
   
   /**
-   * Test printer connection without printing
-   * 
-   * @param deviceName - Optional device name
-   * @returns Connection test result
+   * Scan for printers (like Cat-Printer /devices).
+   *
+   * @param scanTimeMs - How long to scan in ms
+   * @param listAll - If true, return all BLE devices (test unknown device)
+   * @returns List of BLE devices (pass one to connectToDevice or print options.device)
+   */
+  async scanForPrinters(scanTimeMs?: number, listAll?: boolean): Promise<Device[]> {
+    const printerService = getPrinterService();
+    return printerService.scanForDevices({
+      scanTimeMs: scanTimeMs ?? 4000,
+      listAll,
+    });
+  }
+
+  /**
+   * Connect to a specific device (by Device object from scan).
+   */
+  async connectToDevice(device: Device): Promise<PrintResult> {
+    try {
+      const printerService = getPrinterService();
+      await printerService.initialize();
+      await printerService.connect(device);
+      return { success: true, message: 'Connected' };
+    } catch (error) {
+      return {
+        success: false,
+        message: error instanceof Error ? error.message : 'Unknown error',
+        error: error instanceof Error ? error : new Error(String(error)),
+      };
+    }
+  }
+
+  /**
+   * Disconnect from current printer.
+   */
+  async disconnect(): Promise<void> {
+    await getPrinterService().disconnect();
+  }
+
+  /** Whether a printer is currently connected. */
+  isConnected(): boolean {
+    return getPrinterService().isConnected();
+  }
+
+  /**
+   * Test printer connection without printing.
    */
   async testConnection(deviceName?: string): Promise<PrintResult> {
     try {
-      console.log('🔍 Testing printer connection...');
-      
       const printerService = getPrinterService();
       await printerService.initialize();
-      
       const device = await printerService.scanForPrinter(deviceName);
       await printerService.connect(device);
       await printerService.disconnect();
-      
-      console.log('✅ Connection test successful');
-      
-      return {
-        success: true,
-        message: 'Printer connection successful',
-      };
-      
+      return { success: true, message: 'Printer connection successful' };
     } catch (error) {
-      console.error('🛑 Connection test failed:', error);
-      
       return {
         success: false,
         message: error instanceof Error ? error.message : 'Unknown error',
