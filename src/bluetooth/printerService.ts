@@ -25,6 +25,8 @@ export const POSSIBLE_SERVICE_UUIDS = [
  */
 export const TX_CHARACTERISTIC_UUID = '0000ae01-0000-1000-8000-00805f9b34fb';  // Send data
 export const RX_CHARACTERISTIC_UUID = '0000ae02-0000-1000-8000-00805f9b34fb';  // Receive data
+const TX_CHARACTERISTIC_UUID_ALT = '0000af01-0000-1000-8000-00805f9b34fb';
+const RX_CHARACTERISTIC_UUID_ALT = '0000af02-0000-1000-8000-00805f9b34fb';
 
 /**
  * Printer ready notification signature
@@ -58,6 +60,33 @@ export class PrinterService {
   private connectedDevice: Device | null = null;
   private isPrinterReady = false;
   private isPaused = false;
+
+  private resolveDefaultCharacteristicPair(serviceUuid: string): { tx: string; rx: string } {
+    if (serviceUuid.startsWith('0000af30')) {
+      return { tx: TX_CHARACTERISTIC_UUID_ALT, rx: RX_CHARACTERISTIC_UUID_ALT };
+    }
+    return { tx: TX_CHARACTERISTIC_UUID, rx: RX_CHARACTERISTIC_UUID };
+  }
+
+  private async resolveCharacteristicPair(serviceUuid: string): Promise<{ tx: string; rx: string }> {
+    if (!this.connectedDevice) {
+      throw new Error('No device connected');
+    }
+    const defaults = this.resolveDefaultCharacteristicPair(serviceUuid.toLowerCase());
+    try {
+      const chars = await this.connectedDevice.characteristicsForService(serviceUuid);
+      const uuids = new Set(chars.map((c) => c.uuid.toLowerCase()));
+      const txCandidates = [defaults.tx, TX_CHARACTERISTIC_UUID, TX_CHARACTERISTIC_UUID_ALT]
+        .map((u) => u.toLowerCase());
+      const rxCandidates = [defaults.rx, RX_CHARACTERISTIC_UUID, RX_CHARACTERISTIC_UUID_ALT]
+        .map((u) => u.toLowerCase());
+      const tx = txCandidates.find((u) => uuids.has(u)) ?? defaults.tx.toLowerCase();
+      const rx = rxCandidates.find((u) => uuids.has(u)) ?? defaults.rx.toLowerCase();
+      return { tx, rx };
+    } catch {
+      return { tx: defaults.tx.toLowerCase(), rx: defaults.rx.toLowerCase() };
+    }
+  }
   
   constructor() {
     try {
@@ -292,10 +321,11 @@ export class PrinterService {
       throw new Error('Printer service not found');
     }
     
+    const { rx } = await this.resolveCharacteristicPair(targetService.uuid);
     // Monitor notifications
     this.connectedDevice.monitorCharacteristicForService(
       targetService.uuid,
-      RX_CHARACTERISTIC_UUID,
+      rx,
       (error, characteristic) => {
         if (error) {
           console.error('Notification error:', error);
@@ -380,6 +410,9 @@ export class PrinterService {
       throw new Error('Printer service not found');
     }
     
+    // Resolve characteristics for this service (aeXX/afXX variants)
+    const { tx } = await this.resolveCharacteristicPair(targetService.uuid);
+
     // Set up notifications
     await this.setupNotifications();
     
@@ -400,11 +433,20 @@ export class PrinterService {
       const chunk = buffer.slice(i, Math.min(i + chunkSize, buffer.length));
       const base64Chunk = chunk.toString('base64');
       
-      await this.connectedDevice.writeCharacteristicWithResponseForService(
-        targetService.uuid,
-        TX_CHARACTERISTIC_UUID,
-        base64Chunk
-      );
+      try {
+        await this.connectedDevice.writeCharacteristicWithResponseForService(
+          targetService.uuid,
+          tx,
+          base64Chunk
+        );
+      } catch {
+        // Some devices reject "with response"; fallback keeps compatibility with Cat-printer clones.
+        await this.connectedDevice.writeCharacteristicWithoutResponseForService(
+          targetService.uuid,
+          tx,
+          base64Chunk
+        );
+      }
       
       // Wait between chunks
       await new Promise(resolve => 

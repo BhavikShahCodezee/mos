@@ -1,4 +1,4 @@
-import { useEffect, useState, useCallback, useRef } from 'react';
+import { useEffect, useState, useCallback } from 'react';
 import {
   StyleSheet,
   View,
@@ -12,7 +12,6 @@ import {
   TextInput,
   Text,
 } from 'react-native';
-import { captureRef } from 'react-native-view-shot';
 import { Image } from 'expo-image';
 import * as ImagePicker from 'expo-image-picker';
 import type { Device } from 'react-native-ble-plx';
@@ -22,6 +21,7 @@ import { getPrintService } from '@/src/services/printService';
 import { getPrinterService } from '@/src/bluetooth/printerService';
 import { DitheringAlgorithm } from '@/src/image/dithering';
 import { wrapTextToLines } from '@/src/text/textWrap';
+import { printTextDirect } from '@/src/text/textPrintService';
 import {
   getScanTimeMs,
   setScanTimeMs,
@@ -64,8 +64,6 @@ export default function HomeScreen() {
   const [textSize, setTextSize] = useState(20);
   const [textAlign, setTextAlign] = useState<'left' | 'center' | 'right'>('left');
   const [wrapBySpaces, setWrapBySpaces] = useState(true);
-
-  const textPreviewRef = useRef<View>(null);
 
   const colorScheme = useColorScheme();
   const dark = isDark(colorScheme);
@@ -169,39 +167,50 @@ export default function HomeScreen() {
   const hasText = textContent.trim().length > 0;
 
   const handlePrintText = async () => {
+    const showPrintErrorDialog = (title: string, err: unknown) => {
+      const message = err instanceof Error ? err.message : String(err);
+      const stack = err instanceof Error ? err.stack : undefined;
+      const body = [
+        message,
+        stack ? `\nStack:\n${stack}` : '',
+      ].join('');
+      // Alert can get very long; keep useful diagnostics while staying readable in screenshot.
+      const clipped = body.length > 1800 ? `${body.slice(0, 1800)}\n\n...truncated...` : body;
+      Alert.alert(title, clipped);
+    };
+
     if (!hasText) {
       Alert.alert('No text', 'Enter some text first.');
       return;
     }
-    if (!textPreviewRef.current) return;
+    if (!connected || !selectedDevice) {
+      Alert.alert('Printer not connected', 'Connect a printer before printing text.');
+      return;
+    }
     setIsPrinting(true);
     try {
-      const uri = await captureRef(textPreviewRef.current, {
-        format: 'png',
-        quality: 1,
-        result: 'tmpfile',
-        width: 384,
-      });
-      const result = await printService.print({
-        imageUri: uri,
-        algorithm: 'none',
-        threshold: 16,
+      console.log('📝 Text print requested');
+      console.log(`   chars=${textContent.length} lines=${textLines.length}`);
+      console.log(`   textSize=${textSize} align=${textAlign} wrapBySpaces=${wrapBySpaces}`);
+      const result = await printTextDirect({
+        text: textContent,
+        fontSize: textSize,
+        align: textAlign,
+        wrapBySpaces,
         energy,
-        rotate: false,
-        transparentAsWhite: true,
-        ...(connected && selectedDevice ? { device: selectedDevice } : { deviceName: selectedDevice?.name ?? undefined }),
+        device: selectedDevice,
       });
       if (result.success) {
-        Alert.alert('Success', `Text printed!\n${result.imageSize?.height}x${result.imageSize?.width}px`);
+        Alert.alert('Success', `Text printed!\n${result.imageSize?.width}x${result.imageSize?.height}px • ${result.dataSize} bytes`);
       } else {
-        Alert.alert('Print Failed', result.message);
+        showPrintErrorDialog('Print Failed', result.error ?? new Error(result.message));
       }
     } catch (error) {
       const msg = error instanceof Error ? error.message : 'Unknown error';
       if (msg.includes('Expo Go')) {
         Alert.alert('Bluetooth Not Available', 'Use a development build for Bluetooth.', [{ text: 'OK' }]);
       } else {
-        Alert.alert('Error', msg);
+        showPrintErrorDialog('Print Failed', error);
       }
     } finally {
       setIsPrinting(false);
@@ -209,6 +218,17 @@ export default function HomeScreen() {
   };
 
   const handlePrint = async () => {
+    const showPrintErrorDialog = (title: string, err: unknown) => {
+      const message = err instanceof Error ? err.message : String(err);
+      const stack = err instanceof Error ? err.stack : undefined;
+      const body = [
+        message,
+        stack ? `\nStack:\n${stack}` : '',
+      ].join('');
+      const clipped = body.length > 1800 ? `${body.slice(0, 1800)}\n\n...truncated...` : body;
+      Alert.alert(title, clipped);
+    };
+
     if (!selectedImage) {
       Alert.alert('No Image', 'Please select an image first');
       return;
@@ -227,14 +247,14 @@ export default function HomeScreen() {
       if (result.success) {
         Alert.alert('Success', `Print completed!\n${result.imageSize?.height}x${result.imageSize?.width}px • ${result.dataSize} bytes`);
       } else {
-        Alert.alert('Print Failed', result.message);
+        showPrintErrorDialog('Print Failed', result.error ?? new Error(result.message));
       }
     } catch (error) {
       const msg = error instanceof Error ? error.message : 'Unknown error';
       if (msg.includes('Expo Go')) {
         Alert.alert('Bluetooth Not Available', 'Use a development build. See BUILD_INSTRUCTIONS.md.', [{ text: 'OK' }]);
       } else {
-        Alert.alert('Error', msg);
+        showPrintErrorDialog('Print Failed', error);
       }
     } finally {
       setIsPrinting(false);
@@ -398,9 +418,7 @@ export default function HomeScreen() {
           </View>
           <ThemedText style={styles.label}>Preview (horizontal strip)</ThemedText>
           <View
-            ref={textPreviewRef}
             style={styles.textPreviewStrip}
-            collapsable={false}
           >
             {textLines.length > 0 ? (
               textLines.map((line, i) => (

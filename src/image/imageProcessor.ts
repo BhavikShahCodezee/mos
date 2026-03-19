@@ -6,7 +6,6 @@
  * Ported from Python implementation: catprinter/img.py
  */
 
-import { manipulateAsync, SaveFormat } from 'expo-image-manipulator';
 import { Image as RNImage } from 'react-native';
 import { 
   applyDithering, 
@@ -18,6 +17,30 @@ import { Canvas, Image as CanvasImage } from 'react-native-canvas';
 
 export const PRINT_WIDTH = 384;
 
+export interface ResizePlan {
+  width: number;
+  height: number;
+}
+
+/**
+ * Compute printer target dimensions with optional 90deg rotation.
+ * This is a pure sizing helper (safe on all runtimes).
+ */
+export function resizeImage(
+  sourceWidth: number,
+  sourceHeight: number,
+  targetWidth: number = PRINT_WIDTH,
+  rotate90: boolean = false
+): ResizePlan {
+  const baseWidth = rotate90 ? sourceHeight : sourceWidth;
+  const baseHeight = rotate90 ? sourceWidth : sourceHeight;
+  const scale = targetWidth / Math.max(1, baseWidth);
+  return {
+    width: targetWidth,
+    height: Math.max(1, Math.round(baseHeight * scale)),
+  };
+}
+
 /**
  * Convert image URI to grayscale pixel array using Canvas
  *
@@ -26,31 +49,78 @@ export const PRINT_WIDTH = 384;
  * @param height - Image height
  * @param transparentAsWhite - If true, treat transparent pixels as white
  */
-async function imageToGrayscale(
-  uri: string,
-  width: number,
-  height: number,
-  transparentAsWhite: boolean = true,
-  brightness: number = 0x80
+interface GrayscaleFromSourceOptions {
+  sourceUri: string;
+  sourceWidth: number;
+  sourceHeight: number;
+  targetWidth: number;
+  targetHeight: number;
+  rotate90?: boolean;
+  transparentAsWhite?: boolean;
+  brightness?: number;
+}
+
+async function imageToGrayscaleFromSource(
+  options: GrayscaleFromSourceOptions
 ): Promise<GrayscaleImage> {
+  const {
+    sourceUri,
+    sourceWidth,
+    sourceHeight,
+    targetWidth,
+    targetHeight,
+    rotate90 = false,
+    transparentAsWhite = true,
+    brightness = 0x80,
+  } = options;
+
   return new Promise((resolve, reject) => {
-    const canvas = new Canvas(width, height);
+    const canvas = new Canvas(targetWidth, targetHeight);
+    canvas.width = targetWidth;
+    canvas.height = targetHeight;
     const ctx = canvas.getContext('2d');
 
     // `react-native-canvas` uses a WebView Image constructor that requires the canvas
     // as first argument. (See node_modules/react-native-canvas/readme.md)
-    const img = new CanvasImage(canvas, height, width);
+    const img = new CanvasImage(canvas, sourceHeight, sourceWidth);
     img.onload = () => {
       try {
-        ctx.drawImage(img, 0, 0, width, height);
-        const imageData = ctx.getImageData(0, 0, width, height);
+        if (rotate90) {
+          ctx.translate(targetWidth, 0);
+          ctx.rotate(Math.PI / 2);
+          ctx.drawImage(
+            img,
+            0,
+            0,
+            sourceWidth,
+            sourceHeight,
+            0,
+            0,
+            targetHeight,
+            targetWidth
+          );
+        } else {
+          ctx.drawImage(
+            img,
+            0,
+            0,
+            sourceWidth,
+            sourceHeight,
+            0,
+            0,
+            targetWidth,
+            targetHeight
+          );
+        }
+
+        const imageData = ctx.getImageData(0, 0, targetWidth, targetHeight);
         const pixels = imageData.data;
         const grayscale: GrayscaleImage = [];
 
-        for (let y = 0; y < height; y++) {
+        for (let y = 0; y < targetHeight; y++) {
           const row: number[] = [];
-          for (let x = 0; x < width; x++) {
-            const i = (y * width + x) * 4;
+          for (let x = 0; x < targetWidth; x++) {
+            const i = (y * targetWidth + x) * 4;
             let r = pixels[i];
             let g = pixels[i + 1];
             let b = pixels[i + 2];
@@ -82,43 +152,18 @@ async function imageToGrayscale(
       }
     };
     img.onerror = (err: unknown) => reject(new Error(`Failed to load image: ${String(err)}`));
-    img.src = uri;
+    img.src = sourceUri;
   });
 }
 
 /**
- * Resize image to printer width (optionally rotate 90° first, like Cat-Printer).
- */
-export async function resizeImage(
-  uri: string,
-  targetWidth: number = PRINT_WIDTH,
-  rotate90: boolean = false
-): Promise<string> {
-  const actions: Parameters<typeof manipulateAsync>[1] = [];
-  if (rotate90) {
-    actions.push({ rotate: 90 });
-  }
-  actions.push({
-    resize: { width: targetWidth },
-  });
-  const result = await manipulateAsync(uri, actions, {
-    compress: 1,
-    format: SaveFormat.PNG,
-  });
-  return result.uri;
-}
-
-/**
- * Convert image to grayscale using expo-image-manipulator
+ * Legacy helper kept for API compatibility.
+ * Grayscale conversion now happens inside `processImageForPrinting`.
  * 
  * @param uri - Image URI
- * @returns Grayscale image URI
+ * @returns Original URI
  */
 export async function convertToGrayscale(uri: string): Promise<string> {
-  // expo-image-manipulator doesn't have built-in grayscale,
-  // so we'll need to handle this differently
-  // For now, return the original URI and handle grayscale conversion
-  // in the native layer or using a different approach
   return uri;
 }
 
@@ -147,19 +192,51 @@ export async function processImageForPrinting(
     transparentAsWhite = true,
   } = options;
 
-  console.log('⏳ Resizing image to', PRINT_WIDTH, 'pixels wide...');
-  const resizedUri = await resizeImage(uri, PRINT_WIDTH, rotate);
-  const dimensions = await getImageDimensions(resizedUri);
-  console.log(`   Image size: ${dimensions.width}x${dimensions.height}`);
+  // Cat-Printer expects a fixed width (384px). For text printing, we already capture
+  // the view at exactly `width: 384`, so we avoid an extra resize/toDataURL step
+  // (which is currently the most fragile part on some Android builds).
+  let originalDimensions: { width: number; height: number };
+  try {
+    originalDimensions = await getImageDimensions(uri);
+  } catch (error) {
+    const msg = error instanceof Error ? error.message : String(error);
+    throw new Error(`imageProcessor.getImageDimensions failed: ${msg}`);
+  }
+  const originalWidthPx = Math.round(originalDimensions.width);
+
+  const plan = resizeImage(
+    Math.round(originalDimensions.width),
+    Math.round(originalDimensions.height),
+    PRINT_WIDTH,
+    rotate
+  );
+  const outWidth = plan.width;
+  const outHeight = plan.height;
+  const needsScale = originalWidthPx !== PRINT_WIDTH || rotate;
+
+  if (needsScale) {
+    console.log(`⏳ Resizing image ${Math.round(originalDimensions.width)}x${Math.round(originalDimensions.height)} -> ${outWidth}x${outHeight}`);
+  } else {
+    console.log(`ℹ️ Image already printer width (${PRINT_WIDTH}px), keeping size ${Math.round(originalDimensions.width)}x${Math.round(originalDimensions.height)}`);
+  }
 
   console.log('⏳ Converting to grayscale...');
-  const grayscaleImage = await imageToGrayscale(
-    resizedUri,
-    dimensions.width,
-    dimensions.height,
-    transparentAsWhite,
-    threshold
-  );
+  let grayscaleImage: GrayscaleImage;
+  try {
+    grayscaleImage = await imageToGrayscaleFromSource({
+      sourceUri: uri,
+      sourceWidth: Math.round(originalDimensions.width),
+      sourceHeight: Math.round(originalDimensions.height),
+      targetWidth: outWidth,
+      targetHeight: outHeight,
+      rotate90: rotate,
+      transparentAsWhite,
+      brightness: threshold,
+    });
+  } catch (error) {
+    const msg = error instanceof Error ? error.message : String(error);
+    throw new Error(`imageProcessor.grayscale failed: ${msg}`);
+  }
 
   // In Cat-Printer frontend, the UI "Brightness" influences grayscale conversion,
   // while the binarization threshold is always 0x80.

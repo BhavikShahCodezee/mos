@@ -103,6 +103,7 @@ export class PrintService {
       const modelName = device?.name ?? deviceName;
       const commandData = cmdsPrintImg(invertedImage, energy, quality, modelName);
       console.log(`✅ Generated ${commandData.length} bytes of commands`);
+      console.log(`   Command preview: ${Array.from(commandData.slice(0, 24)).map((b) => b.toString(16).padStart(2, '0')).join(' ')} ...`);
       
       const printerService = getPrinterService();
       if (getDryRun()) {
