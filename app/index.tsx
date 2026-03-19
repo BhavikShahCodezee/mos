@@ -1,4 +1,4 @@
-import { useState, useCallback, useRef } from 'react';
+import { useEffect, useState, useCallback, useRef } from 'react';
 import {
   StyleSheet,
   View,
@@ -32,6 +32,7 @@ import {
   getQuality,
   setQuality,
 } from '@/src/settings';
+import { loadSavedPrinter, savePrinter, clearSavedPrinter } from '@/src/storage/savedPrinter';
 
 const ALGO_LABELS: Record<DitheringAlgorithm, string> = {
   'floyd-steinberg': 'Picture',
@@ -54,6 +55,7 @@ export default function HomeScreen() {
   const [isPrinting, setIsPrinting] = useState(false);
   const [devices, setDevices] = useState<Device[]>([]);
   const [selectedDevice, setSelectedDevice] = useState<Device | null>(null);
+  const [savedDeviceId, setSavedDeviceId] = useState<string | null>(null);
   const [scanning, setScanning] = useState(false);
   const [scanTimeSec, setScanTimeSec] = useState(String(getScanTimeMs() / 1000));
   const [flip, setFlipState] = useState(getFlip());
@@ -72,6 +74,37 @@ export default function HomeScreen() {
   const connected = printService.isConnected();
   const connectedDeviceName = connected ? getPrinterService().getConnectedDevice()?.name ?? 'Printer' : null;
 
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      try {
+        const saved = await loadSavedPrinter();
+        if (cancelled) return;
+        if (!saved) return;
+
+        setSavedDeviceId(saved.id);
+
+        // Auto-connect: scan briefly and connect if found.
+        // We try by ID first (best on Android), then by name.
+        const list = await printService.scanForPrinters(2500, true);
+        if (cancelled) return;
+        const match =
+          list.find((d) => d.id === saved.id) ||
+          (saved.name ? list.find((d) => d.name === saved.name) : undefined);
+
+        if (match) {
+          setSelectedDevice(match);
+          await printService.connectToDevice(match);
+        }
+      } catch {
+        // Silent: permissions/BLE state might not be ready on first open.
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [printService]);
+
   const onScan = useCallback((listAll: boolean) => async () => {
     setScanning(true);
     try {
@@ -86,7 +119,7 @@ export default function HomeScreen() {
     } finally {
       setScanning(false);
     }
-  }, []);
+  }, [printService]);
 
   const onSelectDevice = useCallback(async (device: Device) => {
     setSelectedDevice(device);
@@ -94,16 +127,26 @@ export default function HomeScreen() {
     try {
       const result = await printService.connectToDevice(device);
       if (!result.success) Alert.alert('Connection failed', result.message);
+      else {
+        await savePrinter({ id: device.id, name: device.name });
+        setSavedDeviceId(device.id);
+      }
     } catch (e) {
       Alert.alert('Error', e instanceof Error ? e.message : 'Unknown error');
     } finally {
       setIsPrinting(false);
     }
-  }, []);
+  }, [printService]);
 
   const onDisconnect = useCallback(async () => {
     await printService.disconnect();
     setSelectedDevice(null);
+  }, [printService]);
+
+  const onForgetDevice = useCallback(async () => {
+    await clearSavedPrinter();
+    setSavedDeviceId(null);
+    Alert.alert('Saved device cleared', 'We will not auto-connect next time.');
   }, []);
 
   const pickImage = async () => {
@@ -263,6 +306,14 @@ export default function HomeScreen() {
                   <ThemedText style={styles.secondaryButtonText}>Test unknown device</ThemedText>
                 </TouchableOpacity>
               </View>
+              {!!savedDeviceId && (
+                <View style={{ marginTop: 12, flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center' }}>
+                  <ThemedText style={{ fontSize: 13, opacity: 0.75 }}>Saved device: {savedDeviceId}</ThemedText>
+                  <TouchableOpacity onPress={onForgetDevice} disabled={isPrinting}>
+                    <ThemedText style={{ fontSize: 13, fontWeight: '600', color: '#FF5722' }}>Forget</ThemedText>
+                  </TouchableOpacity>
+                </View>
+              )}
               {devices.length > 0 && !connected && (
                 <View style={styles.deviceList}>
                   {devices.map((d) => (
@@ -272,7 +323,9 @@ export default function HomeScreen() {
                       onPress={() => onSelectDevice(d)}
                       disabled={isPrinting}
                     >
-                      <ThemedText style={styles.deviceName}>{d.name ?? 'Unknown'}</ThemedText>
+                      <ThemedText style={styles.deviceName}>
+                        {(d.name ?? 'Unknown')}{savedDeviceId === d.id ? ' (Saved)' : ''}
+                      </ThemedText>
                     </TouchableOpacity>
                   ))}
                 </View>

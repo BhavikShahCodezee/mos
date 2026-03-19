@@ -2,9 +2,12 @@
  * Printer Command Generator
  * 
  * Generates binary commands for the thermal printer.
- * All commands are reverse-engineered from the official Android app.
+ *
+ * IMPORTANT: This file mirrors the Python implementation in
+ * `Cat-Printer-0.6.3.0/printer_lib/commander.py` + the print lifecycle in
+ * `Cat-Printer-0.6.3.0/printer.py`.
  * 
- * Ported from Python implementation: catprinter/cmds.py
+ * The protocol is: 0x51 0x78 <cmd> 0x00 <len> 0x00 <payload...> <crc8(payload)> 0xff
  */
 
 import { Buffer } from 'buffer';
@@ -13,24 +16,9 @@ import { BinaryImage } from '../image/dithering';
 export const PRINT_WIDTH = 384;
 
 /**
- * Convert a signed byte to unsigned byte
- * (Handles Java-style signed bytes from reverse engineering)
+ * CRC8 table from Python `printer_lib/commander.py`
  */
-function toUnsignedByte(val: number): number {
-  return val >= 0 ? val : val & 0xff;
-}
-
-/**
- * Create a Uint8Array from a list of signed bytes
- */
-function bs(lst: number[]): Uint8Array {
-  return new Uint8Array(lst.map(toUnsignedByte));
-}
-
-/**
- * Checksum lookup table for command validation
- */
-const CHECKSUM_TABLE = bs([
+const CRC8_TABLE = new Uint8Array([
   0, 7, 14, 9, 28, 27, 18, 21, 56, 63, 54, 49, 36, 35, 42, 45, 112, 119, 126, 121,
   108, 107, 98, 101, 72, 79, 70, 65, 84, 83, 90, 93, -32, -25, -18, -23, -4, -5,
   -14, -11, -40, -33, -42, -47, -60, -61, -54, -51, -112, -105, -98, -103, -116,
@@ -46,193 +34,139 @@ const CHECKSUM_TABLE = bs([
   57, 48, 55, 34, 37, 44, 43, 6, 1, 8, 15, 26, 29, 20, 19, -82, -87, -96, -89, -78,
   -75, -68, -69, -106, -111, -104, -97, -118, -115, -124, -125, -34, -39, -48, -41,
   -62, -59, -52, -53, -26, -31, -24, -17, -6, -3, -12, -13,
-]);
+].map((n) => (n < 0 ? (n & 0xff) : n)));
 
 /**
- * Calculate checksum for command validation
+ * crc8 checksum (Python `crc8`)
  */
-function chkSum(bArr: Uint8Array, start: number, length: number): number {
-  let checksum = 0;
-  for (let i = start; i < start + length; i++) {
-    checksum = CHECKSUM_TABLE[(checksum ^ bArr[i]) & 0xff];
+function crc8(data: Uint8Array): number {
+  let crc = 0;
+  for (let i = 0; i < data.length; i++) {
+    crc = CRC8_TABLE[(crc ^ data[i]) & 0xff]!;
   }
-  return checksum;
+  return crc & 0xff;
 }
 
 /**
- * Pre-defined printer commands (reverse-engineered)
+ * Reverse bits in a byte (Python `reverse_bits`)
  */
-export const CMD_GET_DEV_STATE = bs([81, 120, -93, 0, 1, 0, 0, 0, -1]);
-
-export const CMD_SET_QUALITY_200_DPI = bs([81, 120, -92, 0, 1, 0, 50, -98, -1]);
-
-export const CMD_GET_DEV_INFO = bs([81, 120, -88, 0, 1, 0, 0, 0, -1]);
-
-export const CMD_LATTICE_START = bs([
-  81, 120, -90, 0, 11, 0, -86, 85, 23,
-  56, 68, 95, 95, 95, 68, 56, 44, -95, -1
-]);
-
-export const CMD_LATTICE_END = bs([
-  81, 120, -90, 0, 11, 0, -86, 85,
-  23, 0, 0, 0, 0, 0, 0, 0, 23, 17, -1
-]);
-
-export const CMD_SET_PAPER = bs([81, 120, -95, 0, 2, 0, 48, 0, -7, -1]);
-
-export const CMD_PRINT_IMG = bs([81, 120, -66, 0, 1, 0, 0, 0, -1]);
-
-export const CMD_PRINT_TEXT = bs([81, 120, -66, 0, 1, 0, 1, 7, -1]);
-
-/**
- * Generate command to feed paper
- */
-export function cmdFeedPaper(amount: number): Uint8Array {
-  const bArr = bs([
-    81, 120, -67, 0, 1, 0,
-    amount & 0xff,
-    0,
-    0xff,
-  ]);
-  bArr[7] = chkSum(bArr, 6, 1);
-  return bArr;
+function reverseBits(i: number): number {
+  return (
+    ((i & 0b10000000) >> 7) |
+    ((i & 0b01000000) >> 5) |
+    ((i & 0b00100000) >> 3) |
+    ((i & 0b00010000) >> 1) |
+    ((i & 0b00001000) << 1) |
+    ((i & 0b00000100) << 3) |
+    ((i & 0b00000010) << 5) |
+    ((i & 0b00000001) << 7)
+  );
 }
 
 /**
- * Generate command to set thermal energy (darkness)
- * 
- * @param val - Energy value (0x0000 = light, 0xFFFF = darkest)
+ * Turn int into little-endian variable-length bytes (Python `int_to_bytes`)
  */
-export function cmdSetEnergy(val: number): Uint8Array {
-  const bArr = bs([
-    81, 120, -81, 0, 2, 0,
-    (val >> 8) & 0xff,  // High byte
-    val & 0xff,          // Low byte
-    0,
-    0xff,
-  ]);
-  bArr[8] = chkSum(bArr, 6, 2);
-  return bArr;
+function intToBytes(i: number, bigEndian = false): Uint8Array {
+  const bytes: number[] = [];
+  let v = Math.max(0, Math.floor(i));
+  while (v !== 0) {
+    bytes.push(v & 0xff);
+    v >>= 8;
+  }
+  if (bytes.length === 0) bytes.push(0);
+  if (bigEndian) bytes.reverse();
+  return new Uint8Array(bytes);
 }
 
 /**
- * Generate command to apply energy setting
+ * Make a printer command frame (Python `make_command`)
+ */
+export function makeCommand(commandBit: number, payload: Uint8Array = new Uint8Array()): Uint8Array {
+  if (payload.length > 0xff) {
+    throw new Error(`Command payload too big (${payload.length} > 255)`);
+  }
+  const out = new Uint8Array(6 + payload.length + 2);
+  out[0] = 0x51;
+  out[1] = 0x78;
+  out[2] = commandBit & 0xff;
+  out[3] = 0x00;
+  out[4] = payload.length & 0xff;
+  out[5] = 0x00;
+  out.set(payload, 6);
+  out[out.length - 2] = crc8(payload);
+  out[out.length - 1] = 0xff;
+  return out;
+}
+
+export const CMD_START_PRINTING = new Uint8Array([0x51, 0x78, 0xa3, 0x00, 0x01, 0x00, 0x00, 0x00, 0xff]);
+export const CMD_START_PRINTING_NEW = new Uint8Array([0x12, 0x51, 0x78, 0xa3, 0x00, 0x01, 0x00, 0x00, 0x00, 0xff]);
+export const CMD_SET_DPI_AS_200 = makeCommand(0xa4, intToBytes(50));
+export const CMD_LATTICE_START = makeCommand(0xa6, new Uint8Array([0xaa, 0x55, 0x17, 0x38, 0x44, 0x5f, 0x5f, 0x5f, 0x44, 0x38, 0x2c]));
+export const CMD_LATTICE_END = makeCommand(0xa6, new Uint8Array([0xaa, 0x55, 0x17, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x17]));
+export const CMD_GET_DEVICE_STATE = makeCommand(0xa3, intToBytes(0x00));
+export const CMD_GET_DEVICE_INFO = makeCommand(0xa8, intToBytes(0x00));
+export const CMD_UPDATE_DEVICE = makeCommand(0xa9, intToBytes(0x00));
+
+/**
+ * Apply previously set energy (Python `apply_energy`)
  */
 export function cmdApplyEnergy(): Uint8Array {
-  const bArr = bs([
-    81, 120, -66, 0, 1, 0, 1, 0, 0xff,
-  ]);
-  bArr[7] = chkSum(bArr, 6, 1);
-  return bArr;
+  return makeCommand(0xbe, intToBytes(0x01));
 }
 
 /**
- * Set paper feed speed (quality). Lower = faster feed; 28–40 typical. Slower = better heating.
- * Cat-Printer: make_command(0xbd, int_to_bytes(value))
+ * Set paper feed speed (quality). Lower = faster feed; slower = better heating.
  */
 export function cmdSetSpeed(value: number): Uint8Array {
-  const v = Math.max(4, Math.min(255, value));
-  const bArr = bs([
-    81, 120, -67, 0, 1, 0, v, 0, 0xff,
-  ]);
-  bArr[7] = chkSum(bArr, 6, 1);
-  return bArr;
+  const v = Math.max(0, Math.min(0xffff, Math.floor(value)));
+  return makeCommand(0xbd, intToBytes(v));
 }
 
 /**
- * Encode a run of repeated values for run-length compression
+ * Set thermal energy.
+ * Range: 0x0000 .. 0xffff
  */
-function encodeRunLengthRepetition(n: number, val: number): number[] {
-  const res: number[] = [];
-  while (n > 0x7f) {
-    res.push(0x7f | (val << 7));
-    n -= 0x7f;
-  }
-  if (n > 0) {
-    res.push((val << 7) | n);
-  }
-  return res;
+export function cmdSetEnergy(amount: number): Uint8Array {
+  const v = Math.max(0, Math.min(0xffff, Math.floor(amount)));
+  return makeCommand(0xaf, intToBytes(v));
 }
 
 /**
- * Run-length encode an image row
- * 
- * Compresses consecutive identical pixel values.
+ * Feed paper by pixels (Python `feed_paper`)
  */
-function runLengthEncode(imgRow: boolean[]): number[] {
-  const res: number[] = [];
-  let count = 0;
-  let lastVal = -1;
-  
-  for (const pixel of imgRow) {
-    const val = pixel ? 1 : 0;
-    if (val === lastVal) {
-      count++;
-    } else {
-      res.push(...encodeRunLengthRepetition(count, lastVal));
-      count = 1;
-    }
-    lastVal = val;
-  }
-  
-  if (count > 0) {
-    res.push(...encodeRunLengthRepetition(count, lastVal));
-  }
-  
-  return res;
+export function cmdFeedPaper(pixels: number): Uint8Array {
+  const v = Math.max(0, Math.min(0xffff, Math.floor(pixels)));
+  return makeCommand(0xa1, intToBytes(v));
 }
 
 /**
- * Byte encode an image row (8 pixels per byte)
- * 
- * Fallback encoding when run-length compression is inefficient.
+ * Draw a bitmap row. Input is raw bitmap bytes (width/8 bytes) where bits are MSB->LSB.
+ * The device expects bits reversed per byte (Python `draw_bitmap`).
  */
-function byteEncode(imgRow: boolean[]): number[] {
-  const res: number[] = [];
-  
-  for (let chunkStart = 0; chunkStart < imgRow.length; chunkStart += 8) {
-    let byte = 0;
-    for (let bitIndex = 0; bitIndex < 8; bitIndex++) {
-      if (imgRow[chunkStart + bitIndex]) {
-        byte |= 1 << bitIndex;
-      }
-    }
-    res.push(byte);
-  }
-  
-  return res;
+export function cmdDrawBitmap(rowBytes: Uint8Array): Uint8Array {
+  const reversed = new Uint8Array(rowBytes.length);
+  for (let i = 0; i < rowBytes.length; i++) reversed[i] = reverseBits(rowBytes[i]!);
+  return makeCommand(0xa2, reversed);
 }
 
-/**
- * Generate command to print a single row of pixels
- */
-export function cmdPrintRow(imgRow: boolean[]): Uint8Array {
-  // Try run-length compression first
-  let encodedImg = runLengthEncode(imgRow);
-  
-  // If compression doesn't help, use fixed-length encoding
-  if (encodedImg.length > PRINT_WIDTH / 8) {
-    encodedImg = byteEncode(imgRow);
-    const bArr = bs([
-      81, 120, -94, 0,
-      encodedImg.length, 0,
-      ...encodedImg,
-      0, 0xff
-    ]);
-    bArr[bArr.length - 2] = chkSum(bArr, 6, encodedImg.length);
-    return bArr;
-  }
-  
-  // Build run-length encoded command
-  const bArr = bs([
-    81, 120, -65, 0,
-    encodedImg.length, 0,
-    ...encodedImg,
-    0, 0xff
-  ]);
-  bArr[bArr.length - 2] = chkSum(bArr, 6, encodedImg.length);
-  return bArr;
+export interface PrinterModel {
+  paperWidth: number;
+  isNewKind: boolean;
+  problemFeeding: boolean;
 }
+
+export const MODELS: Record<string, PrinterModel> = (() => {
+  const base: PrinterModel = { paperWidth: PRINT_WIDTH, isNewKind: false, problemFeeding: false };
+  const models: Record<string, PrinterModel> = {};
+  for (const name of ['_ZZ00', 'GB01', 'GB02', 'GB03', 'GT01', 'MX05', 'MX06', 'MX08', 'YT01']) {
+    models[name] = { ...base };
+  }
+  // compressed-capable / new kind
+  for (const name of ['GB03']) models[name] = { ...models[name], isNewKind: true };
+  // problematic feeding
+  for (const name of ['MX05', 'MX06', 'MX08']) models[name] = { ...models[name], problemFeeding: true };
+  return models;
+})();
 
 /**
  * Generate complete command sequence to print an image
@@ -244,31 +178,47 @@ export function cmdPrintRow(imgRow: boolean[]): Uint8Array {
 export function cmdsPrintImg(
   img: BinaryImage,
   energy: number = 0xffff,
-  quality: number = 36
+  quality: number = 36,
+  modelName?: string
 ): Uint8Array {
-  const parts: Uint8Array[] = [
-    CMD_GET_DEV_STATE,
-    CMD_SET_QUALITY_200_DPI,
-    cmdSetSpeed(quality),
-    cmdSetEnergy(energy),
-    cmdApplyEnergy(),
-    CMD_LATTICE_START,
-  ];
-  
-  // Add row commands
+  const model = (modelName && MODELS[modelName]) ? MODELS[modelName] : MODELS['_ZZ00']!;
+  const paperWidth = model.paperWidth;
+  const bytesPerRow = paperWidth / 8;
+
+  const parts: Uint8Array[] = [];
+  // prepare() sequence, matching Python
+  parts.push(CMD_GET_DEVICE_STATE);
+  parts.push(model.isNewKind ? CMD_START_PRINTING_NEW : CMD_START_PRINTING);
+  parts.push(CMD_SET_DPI_AS_200);
+  if (quality) parts.push(cmdSetSpeed(quality));
+  parts.push(cmdSetEnergy(energy));
+  parts.push(cmdApplyEnergy());
+  parts.push(CMD_UPDATE_DEVICE);
+  parts.push(CMD_LATTICE_START);
+
+  // bitmap body: one makeCommand(0xa2, rowBytesReversed) per row
   for (const row of img) {
-    parts.push(cmdPrintRow(row));
+    const rowBytes = new Uint8Array(bytesPerRow);
+    for (let x = 0; x < paperWidth; x++) {
+      if (row[x]) {
+        const byteIndex = (x / 8) | 0;
+        const bitIndex = 7 - (x % 8);
+        rowBytes[byteIndex] |= (1 << bitIndex);
+      }
+    }
+    parts.push(cmdDrawBitmap(rowBytes));
   }
-  
-  // Add finalization commands
-  parts.push(
-    cmdFeedPaper(25),
-    CMD_SET_PAPER,
-    CMD_SET_PAPER,
-    CMD_SET_PAPER,
-    CMD_LATTICE_END,
-    CMD_GET_DEV_STATE
-  );
+
+  // finish() sequence, matching Python
+  parts.push(CMD_LATTICE_END);
+  parts.push(cmdSetSpeed(8));
+  if (model.problemFeeding) {
+    const empty = new Uint8Array(bytesPerRow); // all white
+    for (let i = 0; i < 128; i++) parts.push(cmdDrawBitmap(empty));
+  } else {
+    parts.push(cmdFeedPaper(128));
+  }
+  parts.push(CMD_GET_DEVICE_STATE);
   
   // Concatenate all parts
   const totalLength = parts.reduce((sum, part) => sum + part.length, 0);

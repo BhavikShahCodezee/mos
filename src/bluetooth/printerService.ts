@@ -6,8 +6,10 @@
  * Ported from Python implementation: catprinter/ble.py
  */
 
-import { BleManager, Device, State, Characteristic } from 'react-native-ble-plx';
+import { BleManager, Device, State } from 'react-native-ble-plx';
 import { Buffer } from 'buffer';
+import { Platform, PermissionsAndroid } from 'react-native';
+import type { Permission, PermissionStatus } from 'react-native';
 
 /**
  * BLE Service UUIDs
@@ -32,6 +34,13 @@ const PRINTER_READY_NOTIFICATION = Buffer.from([
 ]);
 
 /**
+ * Printer flow control notifications (from Python `Commander`)
+ */
+const PRINTER_PAUSE_NOTIFICATION = Buffer.from([
+  0x51, 0x78, 0xae, 0x01, 0x01, 0x00, 0x10, 0x70, 0xff,
+]);
+
+/**
  * Timing constants
  */
 const DEFAULT_SCAN_TIME_MS = 4000;
@@ -48,11 +57,12 @@ export class PrinterService {
   private bleManager: BleManager | null = null;
   private connectedDevice: Device | null = null;
   private isPrinterReady = false;
+  private isPaused = false;
   
   constructor() {
     try {
       this.bleManager = new BleManager();
-    } catch (error) {
+    } catch {
       console.warn(
         '⚠️ BLE Manager not available. ' +
         'This is expected in Expo Go. ' +
@@ -80,6 +90,10 @@ export class PrinterService {
    */
   async initialize(): Promise<void> {
     this.checkBleAvailable();
+
+    if (Platform.OS === 'android') {
+      await this.requestAndroidBlePermissions();
+    }
     
     const state = await this.bleManager!.state();
     
@@ -91,6 +105,27 @@ export class PrinterService {
     }
     
     console.log('✅ BLE Manager initialized');
+  }
+
+  private async requestAndroidBlePermissions(): Promise<void> {
+    // Android 12+ needs BLUETOOTH_SCAN/CONNECT. Android <12 typically needs location for scanning.
+    const api = Platform.Version as number;
+
+    const needed: Permission[] = [];
+    if (api >= 31) {
+      needed.push(
+        PermissionsAndroid.PERMISSIONS.BLUETOOTH_SCAN,
+        PermissionsAndroid.PERMISSIONS.BLUETOOTH_CONNECT
+      );
+    } else {
+      needed.push(PermissionsAndroid.PERMISSIONS.ACCESS_FINE_LOCATION);
+    }
+
+    const results = (await PermissionsAndroid.requestMultiple(needed)) as Record<Permission, PermissionStatus>;
+    const denied = needed.filter((p) => results[p] !== PermissionsAndroid.RESULTS.GRANTED);
+    if (denied.length) {
+      throw new Error('Device is not authorized to use BluetoothLE. Please grant Bluetooth permissions in Settings.');
+    }
   }
   
   /**
@@ -239,6 +274,7 @@ export class PrinterService {
     }
     
     this.isPrinterReady = false;
+    this.isPaused = false;
     
     // Find the service that contains our characteristic
     const services = await this.connectedDevice.services();
@@ -268,16 +304,34 @@ export class PrinterService {
         
         if (characteristic?.value) {
           const data = Buffer.from(characteristic.value, 'base64');
-          console.log('📡 Received notification:', data);
-          
+          // Flow control: pause/resume
+          if (data.equals(PRINTER_PAUSE_NOTIFICATION)) {
+            this.isPaused = true;
+            return;
+          }
           if (data.equals(PRINTER_READY_NOTIFICATION)) {
+            this.isPaused = false;
             this.isPrinterReady = true;
+            return;
           }
         }
       }
     );
   }
   
+  private async waitWhilePaused(): Promise<void> {
+    if (!this.isPaused) return;
+    const start = Date.now();
+    // Same spirit as Python: sleep(0.2) loop until resumed.
+    while (this.isPaused) {
+      // safeguard against hard-deadlock
+      if (Date.now() - start > WAIT_FOR_PRINTER_DONE_TIMEOUT_MS) {
+        throw new Error('Timed out waiting for printer flow-control resume');
+      }
+      await new Promise((resolve) => setTimeout(resolve, 200));
+    }
+  }
+
   /**
    * Wait for printer to be ready
    */
@@ -342,6 +396,7 @@ export class PrinterService {
     
     // Send data in chunks
     for (let i = 0; i < buffer.length; i += chunkSize) {
+      await this.waitWhilePaused();
       const chunk = buffer.slice(i, Math.min(i + chunkSize, buffer.length));
       const base64Chunk = chunk.toString('base64');
       

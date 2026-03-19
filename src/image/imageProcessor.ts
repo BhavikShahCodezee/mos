@@ -7,14 +7,14 @@
  */
 
 import { manipulateAsync, SaveFormat } from 'expo-image-manipulator';
-import { Image } from 'react-native';
+import { Image as RNImage } from 'react-native';
 import { 
   applyDithering, 
   DitheringAlgorithm, 
   GrayscaleImage, 
   BinaryImage 
 } from './dithering';
-import { Canvas } from 'react-native-canvas';
+import { Canvas, Image as CanvasImage } from 'react-native-canvas';
 
 export const PRINT_WIDTH = 384;
 
@@ -30,13 +30,16 @@ async function imageToGrayscale(
   uri: string,
   width: number,
   height: number,
-  transparentAsWhite: boolean = true
+  transparentAsWhite: boolean = true,
+  brightness: number = 0x80
 ): Promise<GrayscaleImage> {
   return new Promise((resolve, reject) => {
     const canvas = new Canvas(width, height);
     const ctx = canvas.getContext('2d');
 
-    const img = new Image();
+    // `react-native-canvas` uses a WebView Image constructor that requires the canvas
+    // as first argument. (See node_modules/react-native-canvas/readme.md)
+    const img = new CanvasImage(canvas, height, width);
     img.onload = () => {
       try {
         ctx.drawImage(img, 0, 0, width, height);
@@ -53,6 +56,8 @@ async function imageToGrayscale(
             let b = pixels[i + 2];
             const a = pixels[i + 3] / 255;
             if (transparentAsWhite && a < 1) {
+              // Match Cat-Printer `monoGrayscale` behaviour:
+              // treat transparency as white by blending towards 255.
               r = r * a + (1 - a) * 255;
               g = g * a + (1 - a) * 255;
               b = b * a + (1 - a) * 255;
@@ -61,8 +66,13 @@ async function imageToGrayscale(
               g *= a;
               b *= a;
             }
-            const gray = Math.round(0.299 * r + 0.587 * g + 0.114 * b);
-            row.push(Math.min(255, Math.max(0, gray)));
+            // Match Cat-Printer `monoGrayscale` weighting + brightness curve.
+            // m = r*0.2125 + g*0.7154 + b*0.0721
+            // m += (brightness-0x80)*(1-m/255)*(m/255)*2
+            let m = r * 0.2125 + g * 0.7154 + b * 0.0721;
+            m += (brightness - 0x80) * (1 - m / 255) * (m / 255) * 2;
+            const gray = Math.round(Math.min(255, Math.max(0, m)));
+            row.push(gray);
           }
           grayscale.push(row);
         }
@@ -71,7 +81,7 @@ async function imageToGrayscale(
         reject(error);
       }
     };
-    img.onerror = (err) => reject(new Error(`Failed to load image: ${err}`));
+    img.onerror = (err: unknown) => reject(new Error(`Failed to load image: ${String(err)}`));
     img.src = uri;
   });
 }
@@ -147,11 +157,15 @@ export async function processImageForPrinting(
     resizedUri,
     dimensions.width,
     dimensions.height,
-    transparentAsWhite
+    transparentAsWhite,
+    threshold
   );
 
-  console.log(`⏳ Applying ${algorithm} dithering (threshold=${threshold})...`);
-  const binaryImage = applyDithering(grayscaleImage, algorithm, threshold);
+  // In Cat-Printer frontend, the UI "Brightness" influences grayscale conversion,
+  // while the binarization threshold is always 0x80.
+  const binarizeThreshold = 0x80;
+  console.log(`⏳ Applying ${algorithm} dithering (threshold=${binarizeThreshold})...`);
+  const binaryImage = applyDithering(grayscaleImage, algorithm, binarizeThreshold);
   console.log('✅ Image processing complete');
   return binaryImage;
 }
@@ -178,7 +192,7 @@ export async function getImageDimensions(
   uri: string
 ): Promise<{ width: number; height: number }> {
   return new Promise((resolve, reject) => {
-    Image.getSize(
+    RNImage.getSize(
       uri,
       (width, height) => {
         resolve({ width, height });

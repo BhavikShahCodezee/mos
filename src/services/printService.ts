@@ -7,7 +7,7 @@
  * Ported from Python implementation: print.py
  */
 
-import { DitheringAlgorithm, BinaryImage } from '../image/dithering';
+import { DitheringAlgorithm } from '../image/dithering';
 import { processImageForPrinting, invertBinaryImage, ProcessImageOptions } from '../image/imageProcessor';
 import { cmdsPrintImg } from '../printer/commandGenerator';
 import { getPrinterService } from '../bluetooth/printerService';
@@ -100,7 +100,8 @@ export class PrintService {
       
       console.log('⏳ Generating printer commands...');
       const quality = getQuality();
-      const commandData = cmdsPrintImg(invertedImage, energy, quality);
+      const modelName = device?.name ?? deviceName;
+      const commandData = cmdsPrintImg(invertedImage, energy, quality, modelName);
       console.log(`✅ Generated ${commandData.length} bytes of commands`);
       
       const printerService = getPrinterService();
