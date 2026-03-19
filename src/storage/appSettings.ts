@@ -1,0 +1,45 @@
+import AsyncStorage from '@react-native-async-storage/async-storage';
+
+export type FontStyleKey = 'System' | 'Excalifont' | 'ShadowsIntoLight';
+export type TextAlignKey = 'left' | 'center' | 'right';
+export type VerticalPositionKey = 'top' | 'center' | 'bottom';
+
+export interface AppSettings {
+  fontStyle: FontStyleKey;
+  fontSize: number;
+  horizontalPosition: TextAlignKey;
+  verticalPosition: VerticalPositionKey;
+  wrapBySpaces: boolean;
+}
+
+const SETTINGS_KEY = 'mos:settings:v1';
+
+export const DEFAULT_SETTINGS: AppSettings = {
+  fontStyle: 'System',
+  fontSize: 20,
+  horizontalPosition: 'left',
+  verticalPosition: 'top',
+  wrapBySpaces: true,
+};
+
+export async function loadAppSettings(): Promise<AppSettings> {
+  try {
+    const raw = await AsyncStorage.getItem(SETTINGS_KEY);
+    if (!raw) return DEFAULT_SETTINGS;
+    const parsed = JSON.parse(raw) as Partial<AppSettings> & { alignment?: TextAlignKey };
+    return {
+      fontStyle: parsed.fontStyle ?? DEFAULT_SETTINGS.fontStyle,
+      fontSize: parsed.fontSize ?? DEFAULT_SETTINGS.fontSize,
+      horizontalPosition: parsed.horizontalPosition ?? parsed.alignment ?? DEFAULT_SETTINGS.horizontalPosition,
+      verticalPosition: parsed.verticalPosition ?? DEFAULT_SETTINGS.verticalPosition,
+      wrapBySpaces: parsed.wrapBySpaces ?? DEFAULT_SETTINGS.wrapBySpaces,
+    };
+  } catch {
+    return DEFAULT_SETTINGS;
+  }
+}
+
+export async function saveAppSettings(settings: AppSettings): Promise<void> {
+  await AsyncStorage.setItem(SETTINGS_KEY, JSON.stringify(settings));
+}
+
